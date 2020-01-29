@@ -7,7 +7,7 @@ from safe_rl.pg.agents import PPOAgent, TRPOAgent, CPOAgent
 from safe_rl.pg.buffer import CPOBuffer
 from safe_rl.pg.network import count_vars, \
                                get_vars, \
-                               mlp_actor_critic,\
+                               actor_critic,\
                                placeholders, \
                                placeholders_from_spaces
 from safe_rl.pg.utils import values_as_sorted_list
@@ -19,8 +19,8 @@ from safe_rl.utils.mpi_tools import mpi_fork, proc_id, num_procs, mpi_sum
 # (PPO, TRPO, their primal-dual equivalents, CPO)
 def run_polopt_agent(env_fn, 
                      agent=PPOAgent(),
-                     actor_critic=mlp_actor_critic, 
-                     ac_kwargs=dict(), 
+                     actor_critic=actor_critic,
+                     ac_kwargs=dict(),
                      seed=0,
                      render=False,
                      # Experience collection:

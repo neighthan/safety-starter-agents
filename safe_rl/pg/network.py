@@ -29,6 +29,23 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
         x = tf.layers.dense(x, units=h, activation=activation)
     return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation)
 
+def my_network(x, config):
+    return x
+
+def make_network(x, config):
+    """
+    :param x: placeholder for the input tensor
+    :param config: network parameters
+    """
+    net_type = config.pop("type")
+    if net_type == "mlp":
+        config["hidden_sizes"].append(config.pop("output_size"))
+        return mlp(x, **config)
+    elif net_type == "custom":
+        return my_network(x, config)
+    else:
+        assert False, f"Network type {net_type} not recognized."
+
 def get_vars(scope=''):
     return [x for x in tf.trainable_variables() if scope in x.name]
 
@@ -76,9 +93,10 @@ def categorical_entropy(logp):
 Policies
 """
 
-def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, action_space):
+def categorical_policy(x, a, config, action_space):
     act_dim = action_space.n
-    logits = mlp(x, list(hidden_sizes)+[act_dim], activation, None)
+    config["output_size"] = act_dim
+    logits = make_network(x, config)
     logp_all = tf.nn.log_softmax(logits)
     pi = tf.squeeze(tf.multinomial(logits,1), axis=1)
     logp = tf.reduce_sum(tf.one_hot(a, depth=act_dim) * logp_all, axis=1)
@@ -94,9 +112,10 @@ def mlp_categorical_policy(x, a, hidden_sizes, activation, output_activation, ac
     return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent
 
 
-def mlp_gaussian_policy(x, a, hidden_sizes, activation, output_activation, action_space):
+def gaussian_policy(x, a, config, action_space):
     act_dim = a.shape.as_list()[-1]
-    mu = mlp(x, list(hidden_sizes)+[act_dim], activation, output_activation)
+    config["output_size"] = act_dim
+    mu = make_network(x, config)
     log_std = tf.get_variable(name='log_std', initializer=-0.5*np.ones(act_dim, dtype=np.float32))
     std = tf.exp(log_std)
     pi = mu + tf.random_normal(tf.shape(mu)) * std
@@ -160,17 +179,23 @@ def mlp_squashed_gaussian_policy(x, a, hidden_sizes, activation, output_activati
 """
 Actor-Critics
 """
-def mlp_actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
+def actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
                      output_activation=None, policy=None, action_space=None):
 
     # default policy builder depends on action space
+    config = {
+        "type": "mlp",
+        "hidden_sizes": list(hidden_sizes),
+        "activation": activation,
+        "output_activation": output_activation,
+    }
     if policy is None and isinstance(action_space, Box):
-        policy = mlp_gaussian_policy
+        policy = gaussian_policy
     elif policy is None and isinstance(action_space, Discrete):
-        policy = mlp_categorical_policy
+        policy = categorical_policy
 
     with tf.variable_scope('pi'):
-        policy_outs = policy(x, a, hidden_sizes, activation, output_activation, action_space)
+        policy_outs = policy(x, a, config, action_space)
         pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent = policy_outs
 
     with tf.variable_scope('vf'):
