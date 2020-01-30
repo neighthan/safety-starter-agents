@@ -9,8 +9,8 @@ from safe_rl.pg.utils import combined_shape, \
 
 class CPOBuffer:
 
-    def __init__(self, size, 
-                 obs_shape, act_shape, pi_info_shapes, 
+    def __init__(self, size,
+                 obs_shape, act_shape, pi_info_shapes,
                  gamma=0.99, lam=0.95,
                  cost_gamma=0.99, cost_lam=0.95):
         self.obs_buf = np.zeros(combined_shape(size, obs_shape), dtype=np.float32)
@@ -24,7 +24,7 @@ class CPOBuffer:
         self.cret_buf = np.zeros(size, dtype=np.float32)    # cost return
         self.cval_buf = np.zeros(size, dtype=np.float32)    # cost value
         self.logp_buf = np.zeros(size, dtype=np.float32)
-        self.pi_info_bufs = {k: np.zeros([size] + list(v), dtype=np.float32) 
+        self.pi_info_bufs = {k: np.zeros([size] + list(v), dtype=np.float32)
                              for k,v in pi_info_shapes.items()}
         self.sorted_pi_info_keys = keys_as_sorted_list(self.pi_info_bufs)
         self.gamma, self.lam = gamma, lam
