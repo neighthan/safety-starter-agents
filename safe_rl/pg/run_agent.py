@@ -1,4 +1,5 @@
 import numpy as np
+import comet_ml
 import tensorflow as tf
 import gym
 import time
@@ -46,7 +47,9 @@ def run_polopt_agent(env_fn,
                      # Logging:
                      logger=None,
                      logger_kwargs=dict(),
-                     save_freq=1
+                     save_freq=1,
+                     use_vision=True,
+                     env_name="",
                      ):
 
 
@@ -63,6 +66,32 @@ def run_polopt_agent(env_fn,
 
     env = env_fn()
 
+    exp = comet_ml.Experiment(log_code=False, log_env_gpu=False, log_env_cpu=False)
+    exp.add_tag("crl")
+
+    if "Point" in env_name:
+        robot_type = "Point"
+    elif "Car" in env_name:
+        robot_type = "Car"
+    elif "Doggo" in env_name:
+        robot_type = "Doggo"
+    else:
+        assert False
+    task = env_name.replace("-v0", "").replace("Safexp-", "").replace(robot_type, "")
+    task, difficulty = task[:-1], task[-1]
+
+    exp.log_parameters({
+        "robot": robot_type,
+        "task": task,
+        "difficulty": difficulty,
+        "model": "cnn0",
+    })
+    if use_vision:
+        # TODO - cmd line arg for shape
+        img_width = img_height = 128
+        from symbolic_safe_rl.safety_gym_utils import VisionWrapper
+        env = VisionWrapper(env, img_width, img_height)
+
     agent.set_logger(logger)
 
     #=========================================================================#
@@ -71,6 +100,9 @@ def run_polopt_agent(env_fn,
 
     # Share information about action space with policy architecture
     ac_kwargs['action_space'] = env.action_space
+
+    if use_vision:
+        ac_kwargs["net_type"] = "cnn"
 
     # Inputs to computation graph from environment spaces
     x_ph, a_ph = placeholders_from_spaces(env.observation_space, env.action_space)
@@ -405,6 +437,11 @@ def run_polopt_agent(env_fn,
                 # Only save EpRet / EpLen if trajectory finished
                 if terminal:
                     logger.store(EpRet=ep_ret, EpLen=ep_len, EpCost=ep_cost)
+                    exp.log_metrics({
+                        "return": ep_ret,
+                        "episode_length": ep_len,
+                        "cost": ep_cost,
+                    })
                 else:
                     print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
 
@@ -531,7 +568,7 @@ if __name__ == '__main__':
 
     run_polopt_agent(lambda : gym.make(args.env),
                      agent=agent,
-                     actor_critic=mlp_actor_critic,
+                     actor_critic=actor_critic,
                      ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
                      seed=args.seed,
                      render=args.render,
@@ -549,5 +586,6 @@ if __name__ == '__main__':
                      cost_lim=args.cost_lim,
                      # Logging:
                      logger_kwargs=logger_kwargs,
-                     save_freq=1
+                     save_freq=1,
+                     env_name=args.env,
                      )

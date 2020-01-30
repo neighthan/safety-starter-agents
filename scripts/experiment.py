@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-import gym 
+import gym
+import comet_ml
 import safety_gym
 import safe_rl
 from safe_rl.utils.run_utils import setup_logger_kwargs
@@ -41,7 +42,7 @@ def main(robot, task, algo, seed, exp_name, cpu):
     logger_kwargs = setup_logger_kwargs(exp_name, seed)
 
     # Algo and Env
-    algo = eval('safe_rl.'+algo)
+    algo = getattr(safe_rl, algo)
     env_name = 'Safexp-'+robot+task+'-v0'
 
     algo(env_fn=lambda: gym.make(env_name),
@@ -54,7 +55,8 @@ def main(robot, task, algo, seed, exp_name, cpu):
          target_kl=target_kl,
          cost_lim=cost_lim,
          seed=seed,
-         logger_kwargs=logger_kwargs
+         logger_kwargs=logger_kwargs,
+         env_name=env_name,
          )
 
 

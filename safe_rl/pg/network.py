@@ -30,6 +30,16 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
     return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation)
 
 def my_network(x, config):
+    assert not config["output_activation"]
+    activation = tf.nn.leaky_relu
+    x = tf.layers.conv2d(x, 32, 3, strides=2, padding="same", activation=activation)
+    # x = tf.layers.batch_normalization(x)
+    x = tf.layers.conv2d(x, 64, 3, strides=2, padding="same", activation=activation)
+    x = tf.layers.conv2d(x, 128, 3, strides=2, padding="same", activation=activation)
+    x = tf.layers.conv2d(x, 256, 3, strides=2, padding="same", activation=activation)
+    x = tf.layers.flatten(x)
+    x = tf.layers.dense(x, units=256, activation=activation)
+    x = tf.layers.dense(x, units=config["output_size"])
     return x
 
 def make_network(x, config):
@@ -40,11 +50,13 @@ def make_network(x, config):
     net_type = config.pop("type")
     if net_type == "mlp":
         config["hidden_sizes"].append(config.pop("output_size"))
-        return mlp(x, **config)
+        net = mlp(x, **config)
     elif net_type == "custom":
-        return my_network(x, config)
+        net = my_network(x, config)
     else:
         assert False, f"Network type {net_type} not recognized."
+    config["type"] = net_type
+    return net
 
 def get_vars(scope=''):
     return [x for x in tf.trainable_variables() if scope in x.name]
@@ -180,7 +192,7 @@ def mlp_squashed_gaussian_policy(x, a, hidden_sizes, activation, output_activati
 Actor-Critics
 """
 def actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
-                     output_activation=None, policy=None, action_space=None):
+                     output_activation=None, policy=None, action_space=None, net_type=""):
 
     # default policy builder depends on action space
     config = {
@@ -189,6 +201,9 @@ def actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
         "activation": activation,
         "output_activation": output_activation,
     }
+    if net_type == "cnn":
+        config["type"] = "custom"
+
     if policy is None and isinstance(action_space, Box):
         policy = gaussian_policy
     elif policy is None and isinstance(action_space, Discrete):
@@ -199,9 +214,17 @@ def actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
         pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent = policy_outs
 
     with tf.variable_scope('vf'):
-        v = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
+        if config["type"] == "mlp":
+            v = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
+        else:
+            config["output_size"] = 1
+            v = tf.squeeze(my_network(x, config), axis=1)
 
     with tf.variable_scope('vc'):
-        vc = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
+        if config["type"] == "mlp":
+            vc = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
+        else:
+            config["output_size"] = 1
+            vc = tf.squeeze(my_network(x, config), axis=1)
 
     return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, vc
