@@ -7,7 +7,7 @@ from safe_rl.utils.run_utils import setup_logger_kwargs
 from safe_rl.utils.mpi_tools import mpi_fork
 
 
-def main(robot, task, algo, seed, exp_name, cpu):
+def main(robot, task, algo, seed, exp_name, cpu, use_vision):
 
     # Verify experiment
     robot_list = ['point', 'car', 'doggo']
@@ -22,7 +22,6 @@ def main(robot, task, algo, seed, exp_name, cpu):
     assert robot.lower() in robot_list, "Invalid robot"
 
     # Hyperparameters
-    exp_name = algo + '_' + robot + task
     if robot=='Doggo':
         num_steps = 1e8
         steps_per_epoch = 60000
@@ -57,6 +56,7 @@ def main(robot, task, algo, seed, exp_name, cpu):
          seed=seed,
          logger_kwargs=logger_kwargs,
          env_name=env_name,
+         use_vision=use_vision,
          )
 
 
@@ -70,6 +70,6 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--exp_name', type=str, default='')
     parser.add_argument('--cpu', type=int, default=1)
+    parser.add_argument("--vision", action="store_true")
     args = parser.parse_args()
-    exp_name = args.exp_name if not(args.exp_name=='') else None
-    main(args.robot, args.task, args.algo, args.seed, exp_name, args.cpu)
+    main(args.robot, args.task, args.algo, args.seed, args.exp_name, args.cpu, args.vision)

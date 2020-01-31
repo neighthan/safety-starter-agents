@@ -15,6 +15,8 @@ from safe_rl.pg.utils import values_as_sorted_list
 from safe_rl.utils.logx import EpochLogger
 from safe_rl.utils.mpi_tf import MpiAdamOptimizer, sync_all_params
 from safe_rl.utils.mpi_tools import mpi_fork, proc_id, num_procs, mpi_sum
+from mpi4py import MPI
+
 
 # Multi-purpose agent runner for policy optimization algos
 # (PPO, TRPO, their primal-dual equivalents, CPO)
@@ -48,7 +50,7 @@ def run_polopt_agent(env_fn,
                      logger=None,
                      logger_kwargs=dict(),
                      save_freq=1,
-                     use_vision=True,
+                     use_vision=False,
                      env_name="",
                      ):
 
@@ -66,8 +68,12 @@ def run_polopt_agent(env_fn,
 
     env = env_fn()
 
-    exp = comet_ml.Experiment(log_code=False, log_env_gpu=False, log_env_cpu=False)
-    exp.add_tag("crl")
+    rank = MPI.COMM_WORLD.Get_rank()
+    if rank == 0:
+        exp = comet_ml.Experiment(log_code=False, log_env_gpu=False, log_env_cpu=False)
+        exp.add_tag("crl")
+    else:
+        exp = None
 
     if "Point" in env_name:
         robot_type = "Point"
@@ -80,12 +86,14 @@ def run_polopt_agent(env_fn,
     task = env_name.replace("-v0", "").replace("Safexp-", "").replace(robot_type, "")
     task, difficulty = task[:-1], task[-1]
 
-    exp.log_parameters({
-        "robot": robot_type,
-        "task": task,
-        "difficulty": difficulty,
-        "model": "cnn0",
-    })
+    if exp:
+        exp.log_parameters({
+            "robot": robot_type,
+            "task": task,
+            "difficulty": difficulty,
+            "model": "cnn0" if use_vision else "mlp",
+            "use_vision": use_vision
+        })
     if use_vision:
         # TODO - cmd line arg for shape
         img_width = img_height = 128
@@ -437,11 +445,12 @@ def run_polopt_agent(env_fn,
                 # Only save EpRet / EpLen if trajectory finished
                 if terminal:
                     logger.store(EpRet=ep_ret, EpLen=ep_len, EpCost=ep_cost)
-                    exp.log_metrics({
-                        "return": ep_ret,
-                        "episode_length": ep_len,
-                        "cost": ep_cost,
-                    })
+                    if exp:
+                        exp.log_metrics({
+                            "return": ep_ret,
+                            "episode_length": ep_len,
+                            "cost": ep_cost,
+                        }, step=epoch * steps_per_epoch + t)
                 else:
                     print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
 
