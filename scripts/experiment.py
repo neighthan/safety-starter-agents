@@ -4,7 +4,6 @@ import comet_ml
 import safety_gym
 import safe_rl
 from safe_rl.utils.run_utils import setup_logger_kwargs
-from safe_rl.utils.mpi_tools import mpi_fork
 
 
 def main(robot, task, algo, seed, exp_name, cpu, use_vision):
@@ -21,10 +20,9 @@ def main(robot, task, algo, seed, exp_name, cpu, use_vision):
     assert task.lower() in task_list, "Invalid task"
     assert robot.lower() in robot_list, "Invalid robot"
 
-    # pi_iters = 80
-    # vf_iters = 80
-    pi_iters = 8
-    vf_iters = 8
+    k = 5
+    pi_iters = int(80 / k)
+    vf_iters = int(80 / k)
 
     # Hyperparameters
     if robot=='Doggo':
@@ -32,15 +30,11 @@ def main(robot, task, algo, seed, exp_name, cpu, use_vision):
         steps_per_epoch = 60000
     else:
         num_steps = 1e7
-        # steps_per_epoch = 30000
-        steps_per_epoch = 3_000
+        steps_per_epoch = int(30000 / k)
     epochs = int(num_steps / steps_per_epoch)
     save_freq = 50
     target_kl = 0.01
     cost_lim = 25
-
-    # Fork for parallelizing
-    mpi_fork(cpu)
 
     # Prepare Logger
     exp_name = exp_name or (algo + '_' + robot.lower() + task.lower())

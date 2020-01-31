@@ -15,8 +15,6 @@ from safe_rl.pg.network import count_vars, \
                                placeholders_from_spaces
 from safe_rl.pg.utils import values_as_sorted_list
 from safe_rl.utils.logx import EpochLogger
-from safe_rl.utils.mpi_tf import MpiAdamOptimizer, sync_all_params
-from safe_rl.utils.mpi_tools import mpi_fork, proc_id, num_procs, mpi_sum
 from tqdm import trange
 
 """
@@ -25,6 +23,8 @@ TODO before starting all experiments!!
 * Set the threshold for target # unsafe actions per episode (set it to 0)
 * Do the penalties for being unsafe actually factor into the reward at all? If not,
   do we want to add that or no?
+
+* search for other TODOs here
 """
 
 # Multi-purpose agent runner for policy optimization algos
@@ -73,20 +73,37 @@ def run_polopt_agent(env_fn,
     logger = EpochLogger(**logger_kwargs) if logger is None else logger
     logger.save_config(locals())
 
-    rank = proc_id()
-    seed += 10000 * rank
     tf.set_random_seed(seed)
     np.random.seed(seed)
 
+    import ray
+    ray.init()
+
+    from symbolic_safe_rl.safety_gym_utils import VisionWrapper
+
+
+    @ray.remote
+    class RemoteEnv(object):
+        def __init__(self, env):
+            self.env = VisionWrapper(env, 128, 128)
+
+        def reset(self):
+            obs = self.env.reset()
+            return obs
+
+        def step(self, action):
+            return self.env.step(action)
+
+    n_envs = 6
+    envs = [env_fn() for _ in range(n_envs)]
+    envs = [RemoteEnv.remote(env) for env in envs]
+
+    # one extra to more easily get shapes, etc.
     env = env_fn()
 
-    if rank == 0:
-        range_ = lambda *args, **kwargs: trange(*args, leave=False, **kwargs)
-        exp = comet_ml.Experiment(log_code=False, log_env_gpu=False, log_env_cpu=False)
-        exp.add_tag("crl")
-    else:
-        range_ = range
-        exp = None
+    range_ = lambda *args, **kwargs: trange(*args, leave=False, **kwargs)
+    exp = comet_ml.Experiment(log_code=False, log_env_gpu=False, log_env_cpu=False)
+    exp.add_tag("crl")
 
     if exp:
         if "Point" in env_name:
@@ -111,10 +128,10 @@ def run_polopt_agent(env_fn,
         })
         if log_params:
             exp.log_parameters(log_params)
+
     if use_vision:
         # TODO - cmd line arg for shape
         img_width = img_height = 128
-        from symbolic_safe_rl.safety_gym_utils import VisionWrapper
         env = VisionWrapper(env, img_width, img_height)
 
     agent.set_logger(logger)
@@ -175,16 +192,16 @@ def run_polopt_agent(env_fn,
     act_shape = env.action_space.shape
 
     # Experience buffer
-    local_steps_per_epoch = int(steps_per_epoch / num_procs())
+    local_steps_per_epoch = int(steps_per_epoch / n_envs)
     pi_info_shapes = {k: v.shape.as_list()[1:] for k,v in pi_info_phs.items()}
-    buf = CPOBuffer(local_steps_per_epoch,
+    bufs = [CPOBuffer(local_steps_per_epoch,
                     obs_shape,
                     act_shape,
                     pi_info_shapes,
                     gamma,
                     lam,
                     cost_gamma,
-                    cost_lam)
+                    cost_lam) for _ in range(n_envs)]
 
 
     #=========================================================================#
@@ -207,7 +224,8 @@ def run_polopt_agent(env_fn,
             penalty_loss = -penalty_param * (cur_cost_ph - cost_lim)
         else:
             penalty_loss = -penalty * (cur_cost_ph - cost_lim)
-        train_penalty = MpiAdamOptimizer(learning_rate=penalty_lr).minimize(penalty_loss)
+        # train_penalty = MpiAdamOptimizer(learning_rate=penalty_lr).minimize(penalty_loss)
+        train_penalty = tf.train.AdamOptimizer(learning_rate=penalty_lr).minimize(penalty_loss)
 
 
     #=========================================================================#
@@ -268,7 +286,8 @@ def run_polopt_agent(env_fn,
     elif agent.first_order:
 
         # Optimizer for first-order policy optimization
-        train_pi = MpiAdamOptimizer(learning_rate=agent.pi_lr).minimize(pi_loss)
+        # train_pi = MpiAdamOptimizer(learning_rate=agent.pi_lr).minimize(pi_loss)
+        train_pi = tf.train.AdamOptimizer(learning_rate=agent.pi_lr).minimize(pi_loss)
 
         # Prepare training package for agent
         training_package = dict(train_pi=train_pi)
@@ -300,7 +319,8 @@ def run_polopt_agent(env_fn,
         total_value_loss = v_loss + vc_loss
 
     # Optimizer for value learning
-    train_vf = MpiAdamOptimizer(learning_rate=vf_lr).minimize(total_value_loss)
+    # train_vf = MpiAdamOptimizer(learning_rate=vf_lr).minimize(total_value_loss)
+    train_vf = tf.train.AdamOptimizer(learning_rate=vf_lr).minimize(total_value_loss)
 
 
     #=========================================================================#
@@ -313,7 +333,7 @@ def run_polopt_agent(env_fn,
     sess.run(tf.global_variables_initializer())
 
     # Sync params across processes
-    sess.run(sync_all_params())
+    # sess.run(sync_all_params())
 
     # Setup model saving
     logger.setup_tf_saver(sess, inputs={'x': x_ph}, outputs={'pi': pi, 'v': v, 'vc': vc})
@@ -330,6 +350,7 @@ def run_polopt_agent(env_fn,
     #=========================================================================#
 
     def update():
+        # TODO!!! - need correct epcost...
         cur_cost = logger.get_stats('EpCost')[0]
         c = cur_cost - cost_lim
         if c > 0 and agent.cares_about_cost:
@@ -340,7 +361,12 @@ def run_polopt_agent(env_fn,
         #  Prepare feed dict                                                  #
         #=====================================================================#
 
-        inputs = {k:v for k,v in zip(buf_phs, buf.get())}
+        inputs = {}
+        buf_inputs = [buf.get() for buf in bufs]
+        for i, ph in enumerate(buf_phs):
+            inputs[ph] = np.concatenate([buf_input[i] for buf_input in buf_inputs])
+
+        # inputs = {k:v for k,v in zip(buf_phs, buf.get())}
         inputs[surr_cost_rescale_ph] = logger.get_stats('EpLen')[0]
         inputs[cur_cost_ph] = cur_cost
 
@@ -399,7 +425,14 @@ def run_polopt_agent(env_fn,
     #=========================================================================#
 
     start_time = time.time()
-    o, r, d, c, ep_ret, ep_cost, ep_len = env.reset(), 0, False, 0, 0, 0, 0
+    rs = np.zeros(n_envs)
+    ds = [False] * n_envs
+    cs = np.zeros(n_envs)
+    ep_rets = np.zeros(n_envs)
+    ep_costs = np.zeros(n_envs)
+    ep_lens = np.zeros(n_envs)
+    vc_t0 = np.zeros(n_envs)
+    os = np.stack(ray.get([env.reset.remote() for env in envs]))
     cur_penalty = 0
     cum_cost = 0
 
@@ -411,72 +444,90 @@ def run_polopt_agent(env_fn,
         for t in range_(local_steps_per_epoch):
 
             # Possibly render
-            if render and rank == 0 and t < 1000:
-                env.render()
+            # if render and rank == 0 and t < 1000:
+            #     env.render()
 
             # Get outputs from policy
             get_action_outs = sess.run(get_action_ops,
-                                       feed_dict={x_ph: o[np.newaxis]})
+                                       feed_dict={x_ph: os})
             a = get_action_outs['pi']
             v_t = get_action_outs['v']
-            vc_t = get_action_outs.get('vc', 0)  # Agent may not use cost value func
+            vc_t = get_action_outs.get('vc', vc_t0)  # Agent may not use cost value func
             logp_t = get_action_outs['logp_pi']
             pi_info_t = get_action_outs['pi_info']
+            pi_info_t = [{"mu": pi_info_t["mu"][i:i+1], "log_std": pi_info_t["log_std"]} for i in range(n_envs)]
 
             # Step in environment
-            o2, r, d, info = env.step(a)
+            o2s, rs, ds, infos = zip(*ray.get([env.step.remote(a_i) for env, a_i in zip(envs, a)]))
+            o2s = np.stack(o2s)
+            rs = np.array(rs)
+            # o2, r, d, info = env.step(a)
 
             # Include penalty on cost
-            c = info.get('cost', 0)
+            cs = np.array([info.get('cost', 0) for info in infos])
 
             # Track cumulative cost over training
-            cum_cost += c
+            cum_cost += cs.sum()
 
             # save and log
             if agent.reward_penalized:
-                r_total = r - cur_penalty * c
-                r_total = r_total / (1 + cur_penalty)
-                buf.store(o, a, r_total, v_t, 0, 0, logp_t, pi_info_t)
+                r_totals = rs - cur_penalty * cs
+                r_totals = r_totals / (1 + cur_penalty)
+                for i, buf in enumerate(bufs):
+                    buf.store(os[i], a[i], r_totals[i], v_t[i], 0, 0, logp_t[i], pi_info_t[i])
             else:
-                buf.store(o, a, r, v_t, c, vc_t, logp_t, pi_info_t)
-            logger.store(VVals=v_t, CostVVals=vc_t)
+                for i, buf in enumerate(bufs):
+                    buf.store(os[i], a[i], rs[i], v_t[i], cs[i], vc_t[i], logp_t[i], pi_info_t[i])
+            # TODO - what values to use here??
+            logger.store(VVals=v_t[0], CostVVals=vc_t[0])
 
-            o = o2
-            ep_ret += r
-            ep_cost += c
-            ep_len += 1
+            os = o2s
+            ep_rets += rs
+            ep_costs += cs
+            ep_lens += 1
 
-            terminal = d or (ep_len == max_ep_len)
-            if terminal or (t==local_steps_per_epoch-1):
+            for i, buf in enumerate(bufs):
+                ep_len = ep_lens[i]
+                d = ds[i]
+                terminal = d or (ep_len == max_ep_len)
+                if terminal or (t==local_steps_per_epoch-1):
 
-                # If trajectory didn't reach terminal state, bootstrap value target(s)
-                if d and not(ep_len == max_ep_len):
-                    # Note: we do not count env time out as true terminal state
-                    last_val, last_cval = 0, 0
-                else:
-                    feed_dict={x_ph: o[np.newaxis]}
-                    if agent.reward_penalized:
-                        last_val = sess.run(v, feed_dict=feed_dict)
-                        last_cval = 0
+                    # If trajectory didn't reach terminal state, bootstrap value target(s)
+                    if d and not(ep_len == max_ep_len):
+                        # Note: we do not count env time out as true terminal state
+                        last_val, last_cval = 0, 0
                     else:
-                        last_val, last_cval = sess.run([v, vc], feed_dict=feed_dict)
-                buf.finish_path(last_val, last_cval)
+                        feed_dict={x_ph: os[i:i+1]}
+                        if agent.reward_penalized:
+                            last_val = sess.run(v, feed_dict=feed_dict)
+                            last_cval = 0
+                        else:
+                            last_val, last_cval = sess.run([v, vc], feed_dict=feed_dict)
+                    buf.finish_path(last_val, last_cval)
 
-                # Only save EpRet / EpLen if trajectory finished
-                if terminal:
-                    logger.store(EpRet=ep_ret, EpLen=ep_len, EpCost=ep_cost)
-                    if exp:
-                        exp.log_metrics({
-                            "return": ep_ret,
-                            "episode_length": ep_len,
-                            "cost": ep_cost,
-                        }, step=epoch * steps_per_epoch + t)
-                else:
-                    if verbose:
-                        print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
+                    # Only save EpRet / EpLen if trajectory finished
+                    if terminal:
+                        ep_ret = ep_rets[i]
+                        ep_cost = ep_costs[i]
+                        logger.store(EpRet=ep_ret, EpLen=ep_len, EpCost=ep_cost)
+                        if exp:
+                            exp.log_metrics({
+                                "return": ep_ret,
+                                "episode_length": ep_len,
+                                "cost": ep_cost,
+                            }, step=epoch * steps_per_epoch + t)
+                    else:
+                        if verbose:
+                            print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
 
-                # Reset environment
-                o, r, d, c, ep_ret, ep_len, ep_cost = env.reset(), 0, False, 0, 0, 0, 0
+                    # Reset environment
+                    os[i] = ray.get(envs[i].reset.remote())
+                    rs[i] = 0
+                    # ds[i] = False
+                    cs[i] = 0
+                    ep_rets[i] = 0
+                    ep_lens[i] = 0
+                    ep_costs[i] = 0
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
@@ -490,8 +541,9 @@ def run_polopt_agent(env_fn,
         #=====================================================================#
         #  Cumulative cost calculations                                       #
         #=====================================================================#
-        cumulative_cost = mpi_sum(cum_cost)
-        cost_rate = cumulative_cost / ((epoch+1)*steps_per_epoch)
+        # TODO
+        # cumulative_cost = mpi_sum(cum_cost)
+        # cost_rate = cumulative_cost / ((epoch+1)*steps_per_epoch)
 
         #=====================================================================#
         #  Log performance and stats                                          #
@@ -503,8 +555,8 @@ def run_polopt_agent(env_fn,
         logger.log_tabular('EpRet', with_min_and_max=True)
         logger.log_tabular('EpCost', with_min_and_max=True)
         logger.log_tabular('EpLen', average_only=True)
-        logger.log_tabular('CumulativeCost', cumulative_cost)
-        logger.log_tabular('CostRate', cost_rate)
+        # logger.log_tabular('CumulativeCost', cumulative_cost)
+        # logger.log_tabular('CostRate', cost_rate)
 
         # Value function values
         logger.log_tabular('VVals', with_min_and_max=True)
