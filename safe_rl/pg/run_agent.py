@@ -1,6 +1,8 @@
 import numpy as np
 import comet_ml
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+# import tensorflow as tf
 import gym
 import time
 import safe_rl.pg.trust_region as tro
@@ -15,8 +17,15 @@ from safe_rl.pg.utils import values_as_sorted_list
 from safe_rl.utils.logx import EpochLogger
 from safe_rl.utils.mpi_tf import MpiAdamOptimizer, sync_all_params
 from safe_rl.utils.mpi_tools import mpi_fork, proc_id, num_procs, mpi_sum
-from mpi4py import MPI
+from tqdm import trange
 
+"""
+TODO before starting all experiments!!
+
+* Set the threshold for target # unsafe actions per episode (set it to 0)
+* Do the penalties for being unsafe actually factor into the reward at all? If not,
+  do we want to add that or no?
+"""
 
 # Multi-purpose agent runner for policy optimization algos
 # (PPO, TRPO, their primal-dual equivalents, CPO)
@@ -52,6 +61,8 @@ def run_polopt_agent(env_fn,
                      save_freq=1,
                      use_vision=False,
                      env_name="",
+                     verbose=False,
+                     log_params=None,
                      ):
 
 
@@ -62,38 +73,44 @@ def run_polopt_agent(env_fn,
     logger = EpochLogger(**logger_kwargs) if logger is None else logger
     logger.save_config(locals())
 
-    seed += 10000 * proc_id()
+    rank = proc_id()
+    seed += 10000 * rank
     tf.set_random_seed(seed)
     np.random.seed(seed)
 
     env = env_fn()
 
-    rank = MPI.COMM_WORLD.Get_rank()
     if rank == 0:
+        range_ = lambda *args, **kwargs: trange(*args, leave=False, **kwargs)
         exp = comet_ml.Experiment(log_code=False, log_env_gpu=False, log_env_cpu=False)
         exp.add_tag("crl")
     else:
+        range_ = range
         exp = None
 
-    if "Point" in env_name:
-        robot_type = "Point"
-    elif "Car" in env_name:
-        robot_type = "Car"
-    elif "Doggo" in env_name:
-        robot_type = "Doggo"
-    else:
-        assert False
-    task = env_name.replace("-v0", "").replace("Safexp-", "").replace(robot_type, "")
-    task, difficulty = task[:-1], task[-1]
-
     if exp:
+        if "Point" in env_name:
+           robot_type = "Point"
+        elif "Car" in env_name:
+            robot_type = "Car"
+        elif "Doggo" in env_name:
+            robot_type = "Doggo"
+        else:
+            assert False
+        task = env_name.replace("-v0", "").replace("Safexp-", "").replace(robot_type, "")
+        task, difficulty = task[:-1], task[-1]
+
         exp.log_parameters({
             "robot": robot_type,
             "task": task,
             "difficulty": difficulty,
             "model": "cnn0" if use_vision else "mlp",
-            "use_vision": use_vision
+            "use_vision": use_vision,
+            "steps_per_epoch": steps_per_epoch,
+            "vf_iters": vf_iters,
         })
+        if log_params:
+            exp.log_parameters(log_params)
     if use_vision:
         # TODO - cmd line arg for shape
         img_width = img_height = 128
@@ -314,7 +331,8 @@ def run_polopt_agent(env_fn,
         cur_cost = logger.get_stats('EpCost')[0]
         c = cur_cost - cost_lim
         if c > 0 and agent.cares_about_cost:
-            logger.log('Warning! Safety constraint is already violated.', 'red')
+            if verbose:
+                logger.log('Warning! Safety constraint is already violated.', 'red')
 
         #=====================================================================#
         #  Prepare feed dict                                                  #
@@ -383,15 +401,15 @@ def run_polopt_agent(env_fn,
     cur_penalty = 0
     cum_cost = 0
 
-    for epoch in range(epochs):
+    for epoch in range_(epochs):
 
         if agent.use_penalty:
             cur_penalty = sess.run(penalty)
 
-        for t in range(local_steps_per_epoch):
+        for t in range_(local_steps_per_epoch):
 
             # Possibly render
-            if render and proc_id()==0 and t < 1000:
+            if render and rank == 0 and t < 1000:
                 env.render()
 
             # Get outputs from policy
@@ -452,7 +470,8 @@ def run_polopt_agent(env_fn,
                             "cost": ep_cost,
                         }, step=epoch * steps_per_epoch + t)
                 else:
-                    print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
+                    if verbose:
+                        print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
 
                 # Reset environment
                 o, r, d, c, ep_ret, ep_len, ep_cost = env.reset(), 0, False, 0, 0, 0, 0
@@ -525,7 +544,11 @@ def run_polopt_agent(env_fn,
         logger.log_tabular('Time', time.time()-start_time)
 
         # Show results!
-        logger.dump_tabular()
+        if verbose:
+            logger.dump_tabular()
+        else:
+            logger.log_current_row.clear()
+            logger.first_row = False
 
 if __name__ == '__main__':
     import argparse

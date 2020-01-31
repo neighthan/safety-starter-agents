@@ -21,13 +21,19 @@ def main(robot, task, algo, seed, exp_name, cpu, use_vision):
     assert task.lower() in task_list, "Invalid task"
     assert robot.lower() in robot_list, "Invalid robot"
 
+    # pi_iters = 80
+    # vf_iters = 80
+    pi_iters = 8
+    vf_iters = 8
+
     # Hyperparameters
     if robot=='Doggo':
         num_steps = 1e8
         steps_per_epoch = 60000
     else:
         num_steps = 1e7
-        steps_per_epoch = 30000
+        # steps_per_epoch = 30000
+        steps_per_epoch = 3_000
     epochs = int(num_steps / steps_per_epoch)
     save_freq = 50
     target_kl = 0.01
@@ -44,7 +50,9 @@ def main(robot, task, algo, seed, exp_name, cpu, use_vision):
     algo = getattr(safe_rl, algo)
     env_name = 'Safexp-'+robot+task+'-v0'
 
-    algo(env_fn=lambda: gym.make(env_name),
+    log_params = {"pi_iters": pi_iters}
+    algo(pi_iters=pi_iters,
+         env_fn=lambda: gym.make(env_name),
          ac_kwargs=dict(
              hidden_sizes=(256, 256),
             ),
@@ -57,6 +65,8 @@ def main(robot, task, algo, seed, exp_name, cpu, use_vision):
          logger_kwargs=logger_kwargs,
          env_name=env_name,
          use_vision=use_vision,
+         vf_iters=vf_iters,
+         log_params=log_params,
          )
 
 

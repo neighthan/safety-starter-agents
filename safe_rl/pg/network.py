@@ -1,5 +1,7 @@
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+# import tensorflow as tf
 from gym.spaces import Box, Discrete
 from safe_rl.pg.utils import combined_shape, EPS
 
@@ -29,8 +31,7 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
         x = tf.layers.dense(x, units=h, activation=activation)
     return tf.layers.dense(x, units=hidden_sizes[-1], activation=output_activation)
 
-def my_network(x, config):
-    assert not config["output_activation"]
+def get_img_features(x, config):
     activation = tf.nn.leaky_relu
     x = tf.layers.conv2d(x, 32, 3, strides=2, padding="same", activation=activation)
     # x = tf.layers.batch_normalization(x)
@@ -38,9 +39,12 @@ def my_network(x, config):
     x = tf.layers.conv2d(x, 128, 3, strides=2, padding="same", activation=activation)
     x = tf.layers.conv2d(x, 256, 3, strides=2, padding="same", activation=activation)
     x = tf.layers.flatten(x)
-    x = tf.layers.dense(x, units=256, activation=activation)
-    x = tf.layers.dense(x, units=config["output_size"])
+    x = tf.layers.dense(x, units=512, activation=activation)
     return x
+
+def get_output_layer(x, config):
+    assert not config["output_activation"]
+    return tf.layers.dense(x, units=config["output_size"])
 
 def make_network(x, config):
     """
@@ -51,8 +55,10 @@ def make_network(x, config):
     if net_type == "mlp":
         config["hidden_sizes"].append(config.pop("output_size"))
         net = mlp(x, **config)
-    elif net_type == "custom":
-        net = my_network(x, config)
+    elif net_type == "img_features":
+        net = get_img_features(x, config)
+    elif net_type == "output_layer":
+        net = get_output_layer(x, config)
     else:
         assert False, f"Network type {net_type} not recognized."
     config["type"] = net_type
@@ -202,7 +208,11 @@ def actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
         "output_activation": output_activation,
     }
     if net_type == "cnn":
-        config["type"] = "custom"
+        config["type"] = "img_features"
+        # does it matter that this isn't in one of the variable scopes?
+        img_features = get_img_features(x, config)
+        x = img_features
+        config["type"] = "output_layer"
 
     if policy is None and isinstance(action_space, Box):
         policy = gaussian_policy
@@ -218,13 +228,13 @@ def actor_critic(x, a, hidden_sizes=(64,64), activation=tf.tanh,
             v = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
         else:
             config["output_size"] = 1
-            v = tf.squeeze(my_network(x, config), axis=1)
+            v = tf.squeeze(get_output_layer(x, config), axis=1)
 
     with tf.variable_scope('vc'):
         if config["type"] == "mlp":
             vc = tf.squeeze(mlp(x, list(hidden_sizes)+[1], activation, None), axis=1)
         else:
             config["output_size"] = 1
-            vc = tf.squeeze(my_network(x, config), axis=1)
+            vc = tf.squeeze(get_output_layer(x, config), axis=1)
 
     return pi, logp, logp_pi, pi_info, pi_info_phs, d_kl, ent, v, vc

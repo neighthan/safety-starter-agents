@@ -13,9 +13,10 @@ def ppo(**kwargs):
     run_polopt_agent(agent=agent, **kwargs)
 
 
-def ppo_lagrangian(**kwargs):
+def ppo_lagrangian(pi_iters, **kwargs):
     # Objective-penalized form of Lagrangian PPO.
     ppo_kwargs = dict(
+                    pi_iters=pi_iters,
                     reward_penalized=False,
                     objective_penalized=True,
                     learn_penalty=True,
