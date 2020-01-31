@@ -307,7 +307,9 @@ def run_polopt_agent(env_fn,
     #  Create session, sync across procs, and set up saver                    #
     #=========================================================================#
 
-    sess = tf.Session()
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    sess = tf.Session(config=config)
     sess.run(tf.global_variables_initializer())
 
     # Sync params across processes
