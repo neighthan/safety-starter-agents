@@ -33,11 +33,14 @@ def mlp(x, hidden_sizes=(32,), activation=tf.tanh, output_activation=None):
 
 def get_img_features(x, config):
     activation = tf.nn.leaky_relu
-    x = tf.layers.conv2d(x, 32, 3, strides=2, padding="same", activation=activation)
-    # x = tf.layers.batch_normalization(x)
-    x = tf.layers.conv2d(x, 64, 3, strides=2, padding="same", activation=activation)
-    x = tf.layers.conv2d(x, 128, 3, strides=2, padding="same", activation=activation)
-    x = tf.layers.conv2d(x, 256, 3, strides=2, padding="same", activation=activation)
+    x = tf.layers.conv2d(x, 32, 3, padding="same", activation=activation)
+    x = tf.layers.max_pooling2d(x, 2, 2)
+    x = tf.layers.conv2d(x, 64, 3, padding="same", activation=activation)
+    x = tf.layers.max_pooling2d(x, 2, 2)
+    x = tf.layers.conv2d(x, 128, 3, padding="same", activation=activation)
+    x = tf.layers.max_pooling2d(x, 2, 2)
+    x = tf.layers.conv2d(x, 128, 3, padding="same", activation=activation)
+    x = tf.layers.conv2d(x, 64, 1, padding="same", activation=activation)
     x = tf.layers.flatten(x)
     x = tf.layers.dense(x, units=512, activation=activation)
     return x

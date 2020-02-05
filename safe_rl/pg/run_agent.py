@@ -12,13 +12,22 @@ from safe_rl.pg.network import count_vars, \
                                get_vars, \
                                actor_critic,\
                                placeholders, \
+                               placeholder_from_space, \
                                placeholders_from_spaces
 from safe_rl.pg.utils import values_as_sorted_list
 from safe_rl.utils.logx import EpochLogger
 from tqdm import trange
+import ray
+from symbolic_safe_rl.safety_gym_utils import VisionWrapper, SymMapCenterNet, State
+import torch
+import math
+from PIL import Image
 
 """
 TODO before starting all experiments!!
+
+* What do we do if no safe action is found?
+  * Do we like discretization better?
 
 * Set the threshold for target # unsafe actions per episode (set it to 0)
 * Do the penalties for being unsafe actually factor into the reward at all? If not,
@@ -26,6 +35,10 @@ TODO before starting all experiments!!
 
 * search for other TODOs here
 """
+
+# TODO - cmd line arg for shape
+IMG_SIZE = 256 # larger size for safety constraints
+IMG_RESIZE = 64 # smaller size for RL training
 
 # Multi-purpose agent runner for policy optimization algos
 # (PPO, TRPO, their primal-dual equivalents, CPO)
@@ -59,12 +72,19 @@ def run_polopt_agent(env_fn,
                      logger=None,
                      logger_kwargs=dict(),
                      save_freq=1,
-                     use_vision=False,
+                     visual_obs=False,
+                     safety_checks=False,
+                     sym_features=False,
                      env_name="",
                      verbose=False,
                      log_params=None,
+                     n_envs=6,
                      ):
 
+    sym_features = False
+    global IMG_SIZE
+    if not (safety_checks or sym_features):
+        IMG_SIZE = IMG_RESIZE
 
     #=========================================================================#
     #  Prepare logger, seed, and environment in this process                  #
@@ -76,38 +96,95 @@ def run_polopt_agent(env_fn,
     tf.set_random_seed(seed)
     np.random.seed(seed)
 
-    import ray
     ray.init()
 
-    from symbolic_safe_rl.safety_gym_utils import VisionWrapper
-
+    if safety_checks or sym_features:
+        device = torch.device("cuda")
+        model = torch.jit.load("/srl/models/model_0166d3228ffa4cb0a55a7c7c696e43b7_final.zip")
+        model = model.to(device).eval()
+        sym_map = SymMapCenterNet(model, device)
 
     @ray.remote
-    class RemoteEnv(object):
-        def __init__(self, env):
-            self.env = VisionWrapper(env, 128, 128)
+    class RemoteEnv:
+        def __init__(self, env, visual_obs: bool, safety_checks: bool):
+            if visual_obs or safety_checks:
+                self.visual_env = VisionWrapper(env, IMG_SIZE, IMG_SIZE)
+                if self.visual_env.viewer is None:
+                    self.visual_env.reset()
+                    self.visual_env._make_viewer()
+            if visual_obs:
+                env = self.visual_env
+
+            self.env = env
+            self.state = State()
+            self.n_unsafe_allowed = 0
+            self.safety_checks = safety_checks
+            self.visual_obs = visual_obs
 
         def reset(self):
             obs = self.env.reset()
-            return obs
+            if self.safety_checks and not self.visual_obs:
+                # have to render still for safety
+                visual_obs = self.visual_env._render()
+                return obs, visual_obs
+            else:
+                return obs, None
 
-        def step(self, action):
-            return self.env.step(action)
+        def get_n_unsafe_allowed(self):
+            return self.n_unsafe_allowed
 
-    n_envs = 6
+        def step(self, mu, log_std, robot_position=None, robot_direction=None, obstacles=None):
+            std = np.exp(log_std)
+            action = mu + np.random.normal(scale=std, size=mu.shape)
+
+            if self.safety_checks:
+                vel = self.env.world.data.get_body_xvelp("robot")
+                speed = math.sqrt((vel[0] ** 2 + vel[1] ** 2))
+
+                self.state.robot_position = robot_position
+                self.state.robot_velocity = speed
+                self.state.robot_direction = robot_direction
+                self.state.obstacles = obstacles
+
+                # TODO - better to discretize or to use sampling?
+                # discretization might help if the probability of safe actions is
+                # very low
+                n_attempts = 0
+                thresh = 100
+                while not self.state.is_safe_action(*action):
+                    action = mu + np.random.normal(scale=std, size=mu.shape)
+                    n_attempts += 1
+                    if n_attempts >= thresh:
+                        self.n_unsafe_allowed += 1
+                        break
+                        # assert False, "No safe action found."
+
+            eps = 1e-10
+            pre_sum = -0.5 * (((action - mu) / (std + eps)) ** 2 + 2 * log_std + np.log(2 * np.pi))
+            log_p = pre_sum.sum()
+
+            if self.safety_checks and not self.visual_obs:
+                visual_obs = self.visual_env._render()
+            else:
+                visual_obs = None
+
+            return (*self.env.step(action), action, log_p, visual_obs)
+
     envs = [env_fn() for _ in range(n_envs)]
-    envs = [RemoteEnv.remote(env) for env in envs]
+    envs = [RemoteEnv.remote(env, visual_obs, safety_checks) for env in envs]
 
     # one extra to more easily get shapes, etc.
     env = env_fn()
+    if visual_obs:
+        env = VisionWrapper(env, IMG_SIZE, IMG_SIZE)
 
     range_ = lambda *args, **kwargs: trange(*args, leave=False, **kwargs)
-    exp = comet_ml.Experiment(log_code=False, log_env_gpu=False, log_env_cpu=False)
+    exp = comet_ml.Experiment(log_env_gpu=False, log_env_cpu=False)
     exp.add_tag("crl")
 
     if exp:
         if "Point" in env_name:
-           robot_type = "Point"
+            robot_type = "Point"
         elif "Car" in env_name:
             robot_type = "Car"
         elif "Doggo" in env_name:
@@ -121,18 +198,13 @@ def run_polopt_agent(env_fn,
             "robot": robot_type,
             "task": task,
             "difficulty": difficulty,
-            "model": "cnn0" if use_vision else "mlp",
-            "use_vision": use_vision,
+            "model": "cnn0" if visual_obs else "mlp",
+            "use_vision": visual_obs,
             "steps_per_epoch": steps_per_epoch,
             "vf_iters": vf_iters,
         })
         if log_params:
             exp.log_parameters(log_params)
-
-    if use_vision:
-        # TODO - cmd line arg for shape
-        img_width = img_height = 128
-        env = VisionWrapper(env, img_width, img_height)
 
     agent.set_logger(logger)
 
@@ -143,11 +215,15 @@ def run_polopt_agent(env_fn,
     # Share information about action space with policy architecture
     ac_kwargs['action_space'] = env.action_space
 
-    if use_vision:
+    if visual_obs:
         ac_kwargs["net_type"] = "cnn"
 
     # Inputs to computation graph from environment spaces
-    x_ph, a_ph = placeholders_from_spaces(env.observation_space, env.action_space)
+    if visual_obs:
+        a_ph = placeholder_from_space(env.action_space)
+        x_ph = tf.placeholder(dtype=tf.float32, shape=(None, IMG_RESIZE, IMG_RESIZE, 3))
+    else:
+        x_ph, a_ph = placeholders_from_spaces(env.observation_space, env.action_space)
 
     # Inputs to computation graph for batch data
     adv_ph, cadv_ph, ret_ph, cret_ph, logp_old_ph = placeholders(*(None for _ in range(5)))
@@ -188,7 +264,10 @@ def run_polopt_agent(env_fn,
     #=========================================================================#
 
     # Obs/act shapes
-    obs_shape = env.observation_space.shape
+    if visual_obs:
+        obs_shape = (IMG_RESIZE, IMG_RESIZE, 3)
+    else:
+        obs_shape = env.observation_space.shape
     act_shape = env.action_space.shape
 
     # Experience buffer
@@ -350,7 +429,7 @@ def run_polopt_agent(env_fn,
     #=========================================================================#
 
     def update():
-        # TODO!!! - need correct epcost...
+        # TODO!!! - is this the correct epcost...
         cur_cost = logger.get_stats('EpCost')[0]
         c = cur_cost - cost_lim
         if c > 0 and agent.cares_about_cost:
@@ -362,62 +441,64 @@ def run_polopt_agent(env_fn,
         #=====================================================================#
 
         inputs = {}
-        buf_inputs = [buf.get() for buf in bufs]
-        for i, ph in enumerate(buf_phs):
-            inputs[ph] = np.concatenate([buf_input[i] for buf_input in buf_inputs])
-
-        # inputs = {k:v for k,v in zip(buf_phs, buf.get())}
         inputs[surr_cost_rescale_ph] = logger.get_stats('EpLen')[0]
         inputs[cur_cost_ph] = cur_cost
 
-        #=====================================================================#
-        #  Make some measurements before updating                             #
-        #=====================================================================#
+        buf_inputs = [buf.get() for buf in bufs]
+        if visual_obs:
+            splits = 2
+        else:
+            splits = 1
+        for j in range(splits):
+            for i, ph in enumerate(buf_phs):
+                inputs[ph] = np.concatenate([buf_input[i][j::splits] for buf_input in buf_inputs])
 
-        measures = dict(LossPi=pi_loss,
-                        SurrCost=surr_cost,
-                        LossV=v_loss,
-                        Entropy=ent)
-        if not(agent.reward_penalized):
-            measures['LossVC'] = vc_loss
-        if agent.use_penalty:
-            measures['Penalty'] = penalty
+            #=====================================================================#
+            #  Make some measurements before updating                             #
+            #=====================================================================#
 
-        pre_update_measures = sess.run(measures, feed_dict=inputs)
-        logger.store(**pre_update_measures)
+            measures = dict(LossPi=pi_loss,
+                            SurrCost=surr_cost,
+                            LossV=v_loss,
+                            Entropy=ent)
+            if not(agent.reward_penalized):
+                measures['LossVC'] = vc_loss
+            if agent.use_penalty:
+                measures['Penalty'] = penalty
 
-        #=====================================================================#
-        #  Update penalty if learning penalty                                 #
-        #=====================================================================#
-        if agent.learn_penalty:
-            sess.run(train_penalty, feed_dict={cur_cost_ph: cur_cost})
+            pre_update_measures = sess.run(measures, feed_dict=inputs)
+            logger.store(**pre_update_measures)
 
-        #=====================================================================#
-        #  Update policy                                                      #
-        #=====================================================================#
-        agent.update_pi(inputs)
+            #=====================================================================#
+            #  Update penalty if learning penalty                                 #
+            #=====================================================================#
+            if agent.learn_penalty:
+                sess.run(train_penalty, feed_dict={cur_cost_ph: cur_cost})
 
-        #=====================================================================#
-        #  Update value function                                              #
-        #=====================================================================#
-        for _ in range(vf_iters):
-            sess.run(train_vf, feed_dict=inputs)
+            #=====================================================================#
+            #  Update policy                                                      #
+            #=====================================================================#
+            agent.update_pi(inputs)
 
-        #=====================================================================#
-        #  Make some measurements after updating                              #
-        #=====================================================================#
+            #=====================================================================#
+            #  Update value function                                              #
+            #=====================================================================#
+            for _ in range(vf_iters):
+                sess.run(train_vf, feed_dict=inputs)
 
-        del measures['Entropy']
-        measures['KL'] = d_kl
+            #=====================================================================#
+            #  Make some measurements after updating                              #
+            #=====================================================================#
 
-        post_update_measures = sess.run(measures, feed_dict=inputs)
-        deltas = dict()
-        for k in post_update_measures:
-            if k in pre_update_measures:
-                deltas['Delta'+k] = post_update_measures[k] - pre_update_measures[k]
-        logger.store(KL=post_update_measures['KL'], **deltas)
+            del measures['Entropy']
+            measures['KL'] = d_kl
 
-
+            post_update_measures = sess.run(measures, feed_dict=inputs)
+            deltas = dict()
+            for k in post_update_measures:
+                if k in pre_update_measures:
+                    deltas['Delta'+k] = post_update_measures[k] - pre_update_measures[k]
+            logger.store(KL=post_update_measures['KL'], **deltas)
 
 
     #=========================================================================#
@@ -432,10 +513,22 @@ def run_polopt_agent(env_fn,
     ep_costs = np.zeros(n_envs)
     ep_lens = np.zeros(n_envs)
     vc_t0 = np.zeros(n_envs)
-    os = np.stack(ray.get([env.reset.remote() for env in envs]))
+
+    os = []
+    visual_os = []
+    for o, visual_o in ray.get([env.reset.remote() for env in envs]):
+        os.append(o)
+        if safety_checks and not visual_obs:
+            visual_os.append(visual_o)
+    os = np.stack(os)
+    if safety_checks and not visual_obs:
+        visual_os = np.stack(visual_os)
+
     cur_penalty = 0
     cum_cost = 0
 
+    n_unsafe = 0
+    n_unsafe_allowed = 0
     for epoch in range_(epochs):
 
         if agent.use_penalty:
@@ -447,6 +540,13 @@ def run_polopt_agent(env_fn,
             # if render and rank == 0 and t < 1000:
             #     env.render()
 
+            if safety_checks or sym_features:
+                if visual_obs:
+                    robot_position, robot_direction, obstacles = sym_map(os)
+                    os = np.stack([np.array(Image.fromarray((o * 255).astype(np.uint8)).resize((IMG_RESIZE, IMG_RESIZE), resample=4)) for o in os])
+                else:
+                    robot_position, robot_direction, obstacles = sym_map(visual_os)
+
             # Get outputs from policy
             get_action_outs = sess.run(get_action_ops,
                                        feed_dict={x_ph: os})
@@ -455,18 +555,35 @@ def run_polopt_agent(env_fn,
             vc_t = get_action_outs.get('vc', vc_t0)  # Agent may not use cost value func
             logp_t = get_action_outs['logp_pi']
             pi_info_t = get_action_outs['pi_info']
-            pi_info_t = [{"mu": pi_info_t["mu"][i:i+1], "log_std": pi_info_t["log_std"]} for i in range(n_envs)]
+            mu = pi_info_t["mu"]
+            log_std = pi_info_t["log_std"]
+            pi_info_t = [{"mu": mu[i:i+1], "log_std": log_std} for i in range(n_envs)]
 
             # Step in environment
-            o2s, rs, ds, infos = zip(*ray.get([env.step.remote(a_i) for env, a_i in zip(envs, a)]))
+
+            args = []
+            for i in range(n_envs):
+                if safety_checks:
+                    args.append((mu[i], log_std, robot_position[i], robot_direction[i], obstacles[obstacles[:, 0] == i, 1:]))
+                else:
+                    args.append((mu[i], log_std))
+
+            # could consider using ray.wait and handling each env separately. since we use
+            # a for loop for much of the computation below anyway, this would probably
+            # be faster (time before + after)
+            o2s, rs, ds, infos, actions, logps, visual_os = zip(*ray.get([env.step.remote(*arg) for env, arg in zip(envs, args)]))
+            a[:] = actions # new actions
+            logp_t[:] = logps # new log ps
             o2s = np.stack(o2s)
+            if safety_checks and not visual_obs:
+                visual_os = np.stack(visual_os)
             rs = np.array(rs)
-            # o2, r, d, info = env.step(a)
 
             # Include penalty on cost
             cs = np.array([info.get('cost', 0) for info in infos])
 
             # Track cumulative cost over training
+            n_unsafe += (cs > 0).sum()
             cum_cost += cs.sum()
 
             # save and log
@@ -491,13 +608,21 @@ def run_polopt_agent(env_fn,
                 d = ds[i]
                 terminal = d or (ep_len == max_ep_len)
                 if terminal or (t==local_steps_per_epoch-1):
+                    # start resetting environment now; get results later
+                    reset_id = envs[i].reset.remote()
 
                     # If trajectory didn't reach terminal state, bootstrap value target(s)
                     if d and not(ep_len == max_ep_len):
                         # Note: we do not count env time out as true terminal state
                         last_val, last_cval = 0, 0
                     else:
-                        feed_dict={x_ph: os[i:i+1]}
+                        if visual_obs:
+                            o = np.array(Image.fromarray((os[i] * 255).astype(np.uint8)).resize((IMG_RESIZE, IMG_RESIZE), resample=4))
+                            print("check o's dtype; make float32. Make necessary changes after calling sym_map(os) too.")
+                            breakpoint()
+                        else:
+                            o = os[i]
+                        feed_dict={x_ph: o[None]}
                         if agent.reward_penalized:
                             last_val = sess.run(v, feed_dict=feed_dict)
                             last_cval = 0
@@ -520,14 +645,22 @@ def run_polopt_agent(env_fn,
                         if verbose:
                             print('Warning: trajectory cut off by epoch at %d steps.'%ep_len)
 
-                    # Reset environment
-                    os[i] = ray.get(envs[i].reset.remote())
+                    o, visual_o = ray.get(reset_id)
+                    os[i] = o
+                    if safety_checks and not visual_obs:
+                        visual_os[i] = visual_o
                     rs[i] = 0
                     # ds[i] = False
                     cs[i] = 0
                     ep_rets[i] = 0
                     ep_lens[i] = 0
                     ep_costs[i] = 0
+
+        n_unsafe_allowed += sum(ray.get([env.get_n_unsafe_allowed.remote() for env in envs]))
+        exp.log_metrics({
+            "n_unsafe_allowed": n_unsafe_allowed,
+            "n_unsafe": n_unsafe,
+        }, step=epoch * steps_per_epoch + t)
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
@@ -541,9 +674,7 @@ def run_polopt_agent(env_fn,
         #=====================================================================#
         #  Cumulative cost calculations                                       #
         #=====================================================================#
-        # TODO
-        # cumulative_cost = mpi_sum(cum_cost)
-        # cost_rate = cumulative_cost / ((epoch+1)*steps_per_epoch)
+        cost_rate = cum_cost / ((epoch + 1) * steps_per_epoch)
 
         #=====================================================================#
         #  Log performance and stats                                          #
@@ -555,8 +686,8 @@ def run_polopt_agent(env_fn,
         logger.log_tabular('EpRet', with_min_and_max=True)
         logger.log_tabular('EpCost', with_min_and_max=True)
         logger.log_tabular('EpLen', average_only=True)
-        # logger.log_tabular('CumulativeCost', cumulative_cost)
-        # logger.log_tabular('CostRate', cost_rate)
+        logger.log_tabular('CumulativeCost', cum_cost)
+        logger.log_tabular('CostRate', cost_rate)
 
         # Value function values
         logger.log_tabular('VVals', with_min_and_max=True)
@@ -633,8 +764,6 @@ if __name__ == '__main__':
         import safety_gym
     except:
         print('Make sure to install Safety Gym to use constrained RL environments.')
-
-    mpi_fork(args.cpu)  # run parallel code with mpi
 
     # Prepare logger
     from safe_rl.utils.run_utils import setup_logger_kwargs

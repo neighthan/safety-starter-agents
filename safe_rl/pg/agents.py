@@ -1,6 +1,5 @@
 from copy import deepcopy
 import numpy as np
-from safe_rl.utils.mpi_tools import mpi_avg
 from safe_rl.pg.utils import EPS
 import safe_rl.pg.trust_region as tro
 
@@ -101,10 +100,10 @@ class Agent:
 
 
 class PPOAgent(Agent):
-    
-    def __init__(self, clip_ratio=0.2, 
-                       pi_lr=3e-4, 
-                       pi_iters=80, 
+
+    def __init__(self, clip_ratio=0.2,
+                       pi_lr=3e-4,
+                       pi_iters=80,
                        kl_margin=1.2,
                        **kwargs):
         super().__init__(**kwargs)
@@ -128,9 +127,8 @@ class PPOAgent(Agent):
         # Run the update
         for i in range(self.pi_iters):
             _, kl = self.sess.run([train_pi, d_kl], feed_dict=inputs)
-            kl = mpi_avg(kl)
             if kl > self.kl_margin * target_kl:
-                self.logger.log('Early stopping at step %d due to reaching max kl.'%i)
+                # self.logger.log('Early stopping at step %d due to reaching max kl.'%i)
                 break
         self.logger.store(StopIter=i)
 
@@ -140,9 +138,9 @@ class PPOAgent(Agent):
 
 class TrustRegionAgent(Agent):
 
-    def __init__(self, damping_coeff=0.1, 
-                       backtrack_coeff=0.8, 
-                       backtrack_iters=10, 
+    def __init__(self, damping_coeff=0.1,
+                       backtrack_coeff=0.8,
+                       backtrack_iters=10,
                        **kwargs):
         super().__init__(**kwargs)
         self.damping_coeff = damping_coeff
@@ -172,9 +170,8 @@ class TRPOAgent(TrustRegionAgent):
         d_kl = self.training_package['d_kl']
         target_kl = self.training_package['target_kl']
 
-        Hx = lambda x : mpi_avg(self.sess.run(hvp, feed_dict={**inputs, v_ph: x}))
+        Hx = lambda x : self.sess.run(hvp, feed_dict={**inputs, v_ph: x})
         g, pi_l_old = self.sess.run([flat_g, pi_loss], feed_dict=inputs)
-        g, pi_l_old = mpi_avg(g), mpi_avg(pi_l_old)
 
         # Core calculations for TRPO or NPG
         x = tro.cg(Hx, g)
@@ -186,7 +183,7 @@ class TRPOAgent(TrustRegionAgent):
 
         def set_and_eval(step):
             self.sess.run(set_pi_params, feed_dict={v_ph: old_params - alpha * x * step})
-            return mpi_avg(self.sess.run([d_kl, pi_loss], feed_dict=inputs))
+            return self.sess.run([d_kl, pi_loss], feed_dict=inputs)
 
         # TRPO augments NPG with backtracking line search, hard kl constraint
         for j in range(self.backtrack_iters):
@@ -233,13 +230,12 @@ class CPOAgent(TrustRegionAgent):
         target_kl = self.training_package['target_kl']
         cost_lim = self.training_package['cost_lim']
 
-        Hx = lambda x : mpi_avg(self.sess.run(hvp, feed_dict={**inputs, v_ph: x}))
+        Hx = lambda x : self.sess.run(hvp, feed_dict={**inputs, v_ph: x})
         outs = self.sess.run([flat_g, flat_b, pi_loss, surr_cost], feed_dict=inputs)
-        outs = [mpi_avg(out) for out in outs]
         g, b, pi_l_old, surr_cost_old = outs
 
 
-        # Need old params, old policy cost gap (epcost - limit), 
+        # Need old params, old policy cost gap (epcost - limit),
         # and surr_cost rescale factor (equal to average eplen).
         old_params = self.sess.run(get_pi_params)
         c = self.logger.get_stats('EpCost')[0] - cost_lim
@@ -249,10 +245,6 @@ class CPOAgent(TrustRegionAgent):
         if self.learn_margin:
             self.margin += self.margin_lr * c
             self.margin = max(0, self.margin)
-
-        # The margin should be the same across processes anyhow, but let's
-        # mpi_avg it just to be 100% sure there's no drift. :)
-        self.margin = mpi_avg(self.margin)
 
         # Adapt threshold with margin.
         c += self.margin
@@ -322,14 +314,14 @@ class CPOAgent(TrustRegionAgent):
         # save intermediates for diagnostic purposes
         self.logger.store(Optim_A=A, Optim_B=B, Optim_c=c,
                           Optim_q=q, Optim_r=r, Optim_s=s,
-                          Optim_Lam=lam, Optim_Nu=nu, 
+                          Optim_Lam=lam, Optim_Nu=nu,
                           Penalty=nu, DeltaPenalty=0,
                           Margin=self.margin,
                           OptimCase=optim_case)
 
         def set_and_eval(step):
             self.sess.run(set_pi_params, feed_dict={v_ph: old_params - step * x})
-            return mpi_avg(self.sess.run([d_kl, pi_loss, surr_cost], feed_dict=inputs))
+            return self.sess.run([d_kl, pi_loss, surr_cost], feed_dict=inputs)
 
         # CPO uses backtracking linesearch to enforce constraints
         self.logger.log('surr_cost_old %.3f'%surr_cost_old, 'blue')
