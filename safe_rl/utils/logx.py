@@ -11,8 +11,8 @@ import tensorflow.compat.v1 as tf
 tf.disable_v2_behavior()
 # import tensorflow as tf
 import os.path as osp, time, atexit, os
-from safe_rl.utils.mpi_tools import proc_id, mpi_statistics_scalar
 from safe_rl.utils.serialization_utils import convert_json
+from safe_rl.pg.buffer import statistics_scalar
 
 color2num = dict(
     gray=30,
@@ -93,7 +93,8 @@ class Logger:
                 hyperparameter configuration with multiple random seeds, you
                 should give them all the same ``exp_name``.)
         """
-        if proc_id()==0:
+        self.proc_id = 0
+        if self.proc_id==0:
             self.output_dir = output_dir or "/tmp/experiments/%i"%int(time.time())
             if osp.exists(self.output_dir):
                 print("Warning: Log dir %s already exists! Storing info there anyway."%self.output_dir)
@@ -112,7 +113,7 @@ class Logger:
 
     def log(self, msg, color='green'):
         """Print a colorized message to stdout."""
-        if proc_id()==0:
+        if self.proc_id==0:
             print(colorize(msg, color, bold=True))
 
     def log_tabular(self, key, val):
@@ -150,7 +151,7 @@ class Logger:
         config_json = convert_json(config)
         if self.exp_name is not None:
             config_json['exp_name'] = self.exp_name
-        if proc_id()==0:
+        if self.proc_id==0:
             output = json.dumps(config_json, separators=(',',':\t'), indent=4, sort_keys=True)
             print(colorize('Saving config:\n', color='cyan', bold=True))
             print(output)
@@ -178,7 +179,7 @@ class Logger:
 
             itr: An int, or None. Current iteration of training.
         """
-        if proc_id()==0:
+        if self.proc_id==0:
             fname = 'vars.pkl' if itr is None else 'vars%d.pkl'%itr
             try:
                 joblib.dump(state_dict, osp.join(self.output_dir, fname))
@@ -214,7 +215,7 @@ class Logger:
         Uses simple_save to save a trained model, plus info to make it easy
         to associated tensors to variables after restore.
         """
-        if proc_id()==0:
+        if self.proc_id==0:
             assert hasattr(self, 'tf_saver_elements'), \
                 "First have to setup saving with self.setup_tf_saver"
             fpath = 'simple_save' + ('%d'%itr if itr is not None else '')
@@ -232,7 +233,7 @@ class Logger:
 
         Writes both to stdout, and to the output file.
         """
-        if proc_id()==0:
+        if self.proc_id==0:
             vals = []
             key_lens = [len(key) for key in self.log_headers]
             max_key_len = max(15,max(key_lens))
@@ -319,7 +320,7 @@ class EpochLogger(Logger):
         else:
             v = self.epoch_dict[key]
             vals = np.concatenate(v) if isinstance(v[0], np.ndarray) and len(v[0].shape)>0 else v
-            stats = mpi_statistics_scalar(vals, with_min_and_max=with_min_and_max)
+            stats = statistics_scalar(vals, with_min_and_max=with_min_and_max)
             super().log_tabular(key if average_only else 'Average' + key, stats[0])
             if not(average_only):
                 super().log_tabular('Std'+key, stats[1])
@@ -334,4 +335,4 @@ class EpochLogger(Logger):
         """
         v = self.epoch_dict[key]
         vals = np.concatenate(v) if isinstance(v[0], np.ndarray) and len(v[0].shape)>0 else v
-        return mpi_statistics_scalar(vals)
+        return statistics_scalar(vals)

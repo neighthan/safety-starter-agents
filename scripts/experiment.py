@@ -6,7 +6,7 @@ import safe_rl
 from safe_rl.utils.run_utils import setup_logger_kwargs
 
 
-def main(robot, task, algo, seed, exp_name, cpu, use_vision):
+def main(robot, task, algo, seed, exp_name, n_envs, visual_obs, safety_checks):
 
     # Verify experiment
     robot_list = ['point', 'car', 'doggo']
@@ -58,11 +58,12 @@ def main(robot, task, algo, seed, exp_name, cpu, use_vision):
          seed=seed,
          logger_kwargs=logger_kwargs,
          env_name=env_name,
-         use_vision=use_vision,
+         visual_obs=visual_obs,
+         safety_checks=safety_checks,
          vf_iters=vf_iters,
          log_params=log_params,
+         n_envs=n_envs,
          )
-
 
 
 if __name__ == '__main__':
@@ -73,7 +74,8 @@ if __name__ == '__main__':
     parser.add_argument('--algo', type=str, default='ppo')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--exp_name', type=str, default='')
-    parser.add_argument('--cpu', type=int, default=1)
+    parser.add_argument('--n_envs', type=int, default=6)
     parser.add_argument("--vision", action="store_true")
+    parser.add_argument("--safe", action="store_true")
     args = parser.parse_args()
-    main(args.robot, args.task, args.algo, args.seed, args.exp_name, args.cpu, args.vision)
+    main(args.robot, args.task, args.algo, args.seed, args.exp_name, args.n_envs, args.vision, args.safe)
