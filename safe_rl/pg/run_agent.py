@@ -18,16 +18,13 @@ from safe_rl.pg.utils import values_as_sorted_list
 from safe_rl.utils.logx import EpochLogger
 from tqdm import trange
 import ray
-from symbolic_safe_rl.safety_gym_utils import VisionWrapper, SymMapCenterNet, State
+from symbolic_safe_rl.safety_gym_utils import VisionWrapper, SymMapCenterNet, State, SymMapOracle
 import torch
 import math
 from PIL import Image
 
 """
 TODO before starting all experiments!!
-
-* What do we do if no safe action is found?
-  * Do we like discretization better?
 
 * Set the threshold for target # unsafe actions per episode (set it to 0)
 * Do the penalties for being unsafe actually factor into the reward at all? If not,
@@ -83,6 +80,7 @@ def run_polopt_agent(env_fn,
                      ):
 
     assert not discretize, "not yet supported; have to change the loss function too?"
+    oracle = True
 
     sym_features = False
     global IMG_SIZE
@@ -123,9 +121,23 @@ def run_polopt_agent(env_fn,
             self.n_unsafe_allowed = 0
             self.safety_checks = safety_checks
             self.visual_obs = visual_obs
+            self.sym_map = SymMapOracle(env)
 
         def reset(self):
-            obs = self.env.reset()
+            i = 0
+            while True:
+                obs = self.env.reset()
+                loc, speed, direction, obstacles = self.sym_map()
+                self.state.robot_position = loc
+                self.state.robot_velocity = speed
+                self.state.robot_direction = direction
+                self.state.obstacles = obstacles
+                if self.state.is_safe_action(0, 0):
+                    break
+                i += 1
+                if i > 100:
+                    print("Unsafe start!")
+
             if self.safety_checks and not self.visual_obs:
                 # have to render still for safety
                 visual_obs = self.visual_env._render()
@@ -158,11 +170,12 @@ def run_polopt_agent(env_fn,
                     action = mu + np.random.normal(scale=std, size=mu.shape)
                     n_attempts += 1
                     if n_attempts >= thresh:
-                        # self.n_unsafe_allowed += 1
                         try:
                             action = self.state.find_safe_action()
                         except IndexError:
                             action = self.state.safe_fallback_action()
+                            self.n_unsafe_allowed += 1
+
                         # assert False, "No safe action found."
 
             eps = 1e-10
@@ -213,6 +226,8 @@ def run_polopt_agent(env_fn,
             "use_vision": visual_obs,
             "steps_per_epoch": steps_per_epoch,
             "vf_iters": vf_iters,
+            "reduced_obstacles": True,
+            "cost_lim": cost_lim,
         })
         if log_params:
             exp.log_parameters(log_params)
@@ -557,6 +572,7 @@ def run_polopt_agent(env_fn,
                     os = np.stack([np.array(Image.fromarray((o * 255).astype(np.uint8)).resize((IMG_RESIZE, IMG_RESIZE), resample=4)) for o in os])
                 else:
                     robot_position, robot_direction, obstacles = sym_map(visual_os)
+                    robot_position, _, robot_direction, obstacles = sym_map(visual_os)
 
             # Get outputs from policy
             get_action_outs = sess.run(get_action_ops,
@@ -667,10 +683,14 @@ def run_polopt_agent(env_fn,
                     ep_lens[i] = 0
                     ep_costs[i] = 0
 
-        # n_unsafe_allowed += sum(ray.get([env.get_n_unsafe_allowed.remote() for env in envs]))
+        cost_rate = cum_cost / ((epoch + 1) * steps_per_epoch)
+
+        n_unsafe_allowed += sum(ray.get([env.get_n_unsafe_allowed.remote() for env in envs]))
         exp.log_metrics({
-            # "n_unsafe_allowed": n_unsafe_allowed,
+            "n_unsafe_allowed": n_unsafe_allowed,
             "n_unsafe": n_unsafe,
+            "cum_cost": cum_cost,
+            "cost_rate": cost_rate,
         }, step=epoch * steps_per_epoch + t)
 
         # Save model
@@ -681,11 +701,6 @@ def run_polopt_agent(env_fn,
         #  Run RL update                                                      #
         #=====================================================================#
         update()
-
-        #=====================================================================#
-        #  Cumulative cost calculations                                       #
-        #=====================================================================#
-        cost_rate = cum_cost / ((epoch + 1) * steps_per_epoch)
 
         #=====================================================================#
         #  Log performance and stats                                          #
