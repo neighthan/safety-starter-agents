@@ -79,7 +79,10 @@ def run_polopt_agent(env_fn,
                      verbose=False,
                      log_params=None,
                      n_envs=6,
+                     discretize=False,
                      ):
+
+    assert not discretize, "not yet supported; have to change the loss function too?"
 
     sym_features = False
     global IMG_SIZE
@@ -155,8 +158,11 @@ def run_polopt_agent(env_fn,
                     action = mu + np.random.normal(scale=std, size=mu.shape)
                     n_attempts += 1
                     if n_attempts >= thresh:
-                        self.n_unsafe_allowed += 1
-                        break
+                        # self.n_unsafe_allowed += 1
+                        try:
+                            action = self.state.find_safe_action()
+                        except IndexError:
+                            action = self.state.safe_fallback_action()
                         # assert False, "No safe action found."
 
             eps = 1e-10
@@ -177,6 +183,11 @@ def run_polopt_agent(env_fn,
     env = env_fn()
     if visual_obs:
         env = VisionWrapper(env, IMG_SIZE, IMG_SIZE)
+    if discretize:
+        n_bins = 20
+        action_space = gym.spaces.MultiDiscrete((n_bins, n_bins))
+    else:
+        action_space = env.action_space
 
     range_ = lambda *args, **kwargs: trange(*args, leave=False, **kwargs)
     exp = comet_ml.Experiment(log_env_gpu=False, log_env_cpu=False)
@@ -213,17 +224,17 @@ def run_polopt_agent(env_fn,
     #=========================================================================#
 
     # Share information about action space with policy architecture
-    ac_kwargs['action_space'] = env.action_space
+    ac_kwargs['action_space'] = action_space
 
     if visual_obs:
         ac_kwargs["net_type"] = "cnn"
 
     # Inputs to computation graph from environment spaces
     if visual_obs:
-        a_ph = placeholder_from_space(env.action_space)
+        a_ph = placeholder_from_space(action_space)
         x_ph = tf.placeholder(dtype=tf.float32, shape=(None, IMG_RESIZE, IMG_RESIZE, 3))
     else:
-        x_ph, a_ph = placeholders_from_spaces(env.observation_space, env.action_space)
+        x_ph, a_ph = placeholders_from_spaces(env.observation_space, action_space)
 
     # Inputs to computation graph for batch data
     adv_ph, cadv_ph, ret_ph, cret_ph, logp_old_ph = placeholders(*(None for _ in range(5)))
@@ -268,7 +279,7 @@ def run_polopt_agent(env_fn,
         obs_shape = (IMG_RESIZE, IMG_RESIZE, 3)
     else:
         obs_shape = env.observation_space.shape
-    act_shape = env.action_space.shape
+    act_shape = action_space.shape
 
     # Experience buffer
     local_steps_per_epoch = int(steps_per_epoch / n_envs)
@@ -656,9 +667,9 @@ def run_polopt_agent(env_fn,
                     ep_lens[i] = 0
                     ep_costs[i] = 0
 
-        n_unsafe_allowed += sum(ray.get([env.get_n_unsafe_allowed.remote() for env in envs]))
+        # n_unsafe_allowed += sum(ray.get([env.get_n_unsafe_allowed.remote() for env in envs]))
         exp.log_metrics({
-            "n_unsafe_allowed": n_unsafe_allowed,
+            # "n_unsafe_allowed": n_unsafe_allowed,
             "n_unsafe": n_unsafe,
         }, step=epoch * steps_per_epoch + t)
 
