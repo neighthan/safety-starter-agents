@@ -40,13 +40,16 @@ def main(robot, task, algo, seed, exp_name, n_envs, visual_obs, safety_checks):
     exp_name = exp_name or (algo + '_' + robot.lower() + task.lower())
     logger_kwargs = setup_logger_kwargs(exp_name, seed)
 
+    kwargs = {}
+    if algo.startswith("ppo"):
+        kwargs["pi_iters"] = pi_iters
+
     # Algo and Env
     algo = getattr(safe_rl, algo)
     env_name = 'Safexp-'+robot+task+'-v0'
 
     log_params = {"pi_iters": pi_iters}
-    algo(pi_iters=pi_iters,
-         env_fn=lambda: gym.make(env_name),
+    algo(env_fn=lambda: gym.make(env_name),
          ac_kwargs=dict(
              hidden_sizes=(256, 256),
             ),
@@ -63,6 +66,7 @@ def main(robot, task, algo, seed, exp_name, n_envs, visual_obs, safety_checks):
          vf_iters=vf_iters,
          log_params=log_params,
          n_envs=n_envs,
+         **kwargs,
          )
 
 
