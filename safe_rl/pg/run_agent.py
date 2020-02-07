@@ -23,15 +23,8 @@ import torch
 import math
 from PIL import Image
 
-"""
-TODO before starting all experiments!!
-
-* Set the threshold for target # unsafe actions per episode (set it to 0)
-* Do the penalties for being unsafe actually factor into the reward at all? If not,
-  do we want to add that or no?
-
-* search for other TODOs here
-"""
+# Do the penalties for being unsafe actually factor into the reward at all? If not,
+#   do we want to add that or no?
 
 # TODO - cmd line arg for shape
 IMG_SIZE = 256 # larger size for safety constraints
@@ -79,8 +72,8 @@ def run_polopt_agent(env_fn,
                      discretize=False,
                      ):
 
-    assert not discretize, "not yet supported; have to change the loss function too?"
     oracle = True
+    assert not discretize, "not yet supported; have to change the loss function too?"
 
     sym_features = False
     global IMG_SIZE
@@ -100,10 +93,11 @@ def run_polopt_agent(env_fn,
     ray.init()
 
     if safety_checks or sym_features:
-        device = torch.device("cuda")
-        model = torch.jit.load("/srl/models/model_0166d3228ffa4cb0a55a7c7c696e43b7_final.zip")
-        model = model.to(device).eval()
-        sym_map = SymMapCenterNet(model, device)
+        if not oracle:
+            device = torch.device("cuda")
+            model = torch.jit.load("/srl/models/model_0166d3228ffa4cb0a55a7c7c696e43b7_final.zip")
+            model = model.to(device).eval()
+            sym_map = SymMapCenterNet(model, device)
 
     @ray.remote
     class RemoteEnv:
@@ -127,16 +121,16 @@ def run_polopt_agent(env_fn,
             i = 0
             while True:
                 obs = self.env.reset()
-                loc, speed, direction, obstacles = self.sym_map()
-                self.state.robot_position = loc
+                robot_position, speed, robot_direction, obstacles = self.sym_map()
+                self.state.robot_position = robot_position
                 self.state.robot_velocity = speed
-                self.state.robot_direction = direction
+                self.state.robot_direction = robot_direction
                 self.state.obstacles = obstacles
                 if self.state.is_safe_action(0, 0):
-                    break
+                    break # found a safe starting position.
                 i += 1
                 if i > 100:
-                    print("Unsafe start!")
+                    print("proceeding with an unsafe starting position.... why is it so hard to find a safe way to start life?!")
 
             if self.safety_checks and not self.visual_obs:
                 # have to render still for safety
@@ -145,16 +139,22 @@ def run_polopt_agent(env_fn,
             else:
                 return obs, None
 
+        def get_oracle_features(self):
+            return self.sym_map()
+
         def get_n_unsafe_allowed(self):
             return self.n_unsafe_allowed
 
-        def step(self, mu, log_std, robot_position=None, robot_direction=None, obstacles=None):
+        def step(self, mu, log_std, oracle=False, robot_position=None, robot_direction=None, obstacles=None):
             std = np.exp(log_std)
             action = mu + np.random.normal(scale=std, size=mu.shape)
 
             if self.safety_checks:
-                vel = self.env.world.data.get_body_xvelp("robot")
-                speed = math.sqrt((vel[0] ** 2 + vel[1] ** 2))
+                if oracle:
+                    robot_position, speed, robot_direction, obstacles = self.sym_map()
+                else:
+                    vel = self.env.world.data.get_body_xvelp("robot")
+                    speed = math.sqrt((vel[0] ** 2 + vel[1] ** 2))
 
                 self.state.robot_position = robot_position
                 self.state.robot_velocity = speed
@@ -164,18 +164,22 @@ def run_polopt_agent(env_fn,
                 # TODO - better to discretize or to use sampling?
                 # discretization might help if the probability of safe actions is
                 # very low
-                n_attempts = 0
                 thresh = 100
+                n_attempts = 0
                 while not self.state.is_safe_action(*action):
                     action = mu + np.random.normal(scale=std, size=mu.shape)
                     n_attempts += 1
                     if n_attempts >= thresh:
+                        # self.n_unsafe_allowed += 1
                         try:
                             action = self.state.find_safe_action()
-                        except IndexError:
+                        except:
                             action = self.state.safe_fallback_action()
-                            self.n_unsafe_allowed += 1
-
+                            # Note: you can set this flag to true in order to get more info about the fact that the safe fallback is not actually safe.
+                            if  not self.state.is_safe_action(*action, False):
+                                self.n_unsafe_allowed += 1
+                                break
+                                #print(f"allowing an unsafe action: {self.state.robot_position} {self.state.robot_velocity} {self.state.obstacles}\n")
                         # assert False, "No safe action found."
 
             eps = 1e-10
@@ -228,6 +232,7 @@ def run_polopt_agent(env_fn,
             "vf_iters": vf_iters,
             "reduced_obstacles": True,
             "cost_lim": cost_lim,
+            "oracle": oracle,
         })
         if log_params:
             exp.log_parameters(log_params)
@@ -568,11 +573,12 @@ def run_polopt_agent(env_fn,
 
             if safety_checks or sym_features:
                 if visual_obs:
-                    robot_position, robot_direction, obstacles = sym_map(os)
+                    if not oracle:
+                        robot_position, robot_direction, obstacles = sym_map(os)
                     os = np.stack([np.array(Image.fromarray((o * 255).astype(np.uint8)).resize((IMG_RESIZE, IMG_RESIZE), resample=4)) for o in os])
                 else:
-                    robot_position, robot_direction, obstacles = sym_map(visual_os)
-                    robot_position, _, robot_direction, obstacles = sym_map(visual_os)
+                    if not oracle:
+                        robot_position, robot_direction, obstacles = sym_map(visual_os)
 
             # Get outputs from policy
             get_action_outs = sess.run(get_action_ops,
@@ -591,9 +597,12 @@ def run_polopt_agent(env_fn,
             args = []
             for i in range(n_envs):
                 if safety_checks:
-                    args.append((mu[i], log_std, robot_position[i], robot_direction[i], obstacles[obstacles[:, 0] == i, 1:]))
+                    if oracle:
+                        args.append((mu[i], log_std, oracle))
+                    else:
+                        args.append((mu[i], log_std, oracle, robot_position[i], robot_direction[i], obstacles[obstacles[:, 0] == i, 1:]))
                 else:
-                    args.append((mu[i], log_std))
+                    args.append((mu[i], log_std, oracle))
 
             # could consider using ray.wait and handling each env separately. since we use
             # a for loop for much of the computation below anyway, this would probably
