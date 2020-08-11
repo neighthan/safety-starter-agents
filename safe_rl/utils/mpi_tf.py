@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow.compat.v1 as tf
+
 tf.disable_v2_behavior()
 # import tensorflow as tf
 from mpi4py import MPI
@@ -7,21 +8,28 @@ from safe_rl.utils.mpi_tools import broadcast
 
 
 def flat_concat(xs):
-    return tf.concat([tf.reshape(x,(-1,)) for x in xs], axis=0)
+    return tf.concat([tf.reshape(x, (-1,)) for x in xs], axis=0)
+
 
 def assign_params_from_flat(x, params):
-    flat_size = lambda p : int(np.prod(p.shape.as_list())) # the 'int' is important for scalars
+    flat_size = lambda p: int(
+        np.prod(p.shape.as_list())
+    )  # the 'int' is important for scalars
     splits = tf.split(x, [flat_size(p) for p in params])
     new_params = [tf.reshape(p_new, p.shape) for p, p_new in zip(params, splits)]
     return tf.group([tf.assign(p, p_new) for p, p_new in zip(params, new_params)])
 
+
 def sync_params(params):
     get_params = flat_concat(params)
+
     def _broadcast(x):
         broadcast(x)
         return x
+
     synced_params = tf.py_func(_broadcast, [get_params], tf.float32)
     return assign_params_from_flat(synced_params, params)
+
 
 def sync_all_params():
     """Sync all tf variables across MPI processes."""
@@ -65,8 +73,9 @@ class MpiAdamOptimizer(tf.train.AdamOptimizer):
         avg_flat_grad = tf.py_func(_collect_grads, [flat_grad], tf.float32)
         avg_flat_grad.set_shape(flat_grad.shape)
         avg_grads = tf.split(avg_flat_grad, sizes, axis=0)
-        avg_grads_and_vars = [(tf.reshape(g, v.shape), v)
-                    for g, (_, v) in zip(avg_grads, grads_and_vars)]
+        avg_grads_and_vars = [
+            (tf.reshape(g, v.shape), v) for g, (_, v) in zip(avg_grads, grads_and_vars)
+        ]
 
         return avg_grads_and_vars
 
@@ -76,5 +85,5 @@ class MpiAdamOptimizer(tf.train.AdamOptimizer):
         """
         opt = super().apply_gradients(grads_and_vars, global_step, name)
         with tf.control_dependencies([opt]):
-            sync = sync_params([v for g,v in grads_and_vars])
+            sync = sync_params([v for g, v in grads_and_vars])
         return tf.group([opt, sync])

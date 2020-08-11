@@ -1,37 +1,47 @@
 import numpy as np
-from safe_rl.pg.utils import combined_shape, \
-                             keys_as_sorted_list, \
-                             values_as_sorted_list, \
-                             discount_cumsum, \
-                             EPS
+from safe_rl.pg.utils import (
+    combined_shape,
+    keys_as_sorted_list,
+    values_as_sorted_list,
+    discount_cumsum,
+    EPS,
+)
 
 
 class CPOBuffer:
-
-    def __init__(self, size,
-                 obs_shape, act_shape, pi_info_shapes,
-                 gamma=0.99, lam=0.95,
-                 cost_gamma=0.99, cost_lam=0.95):
+    def __init__(
+        self,
+        size,
+        obs_shape,
+        act_shape,
+        pi_info_shapes,
+        gamma=0.99,
+        lam=0.95,
+        cost_gamma=0.99,
+        cost_lam=0.95,
+    ):
         self.obs_buf = np.zeros(combined_shape(size, obs_shape), dtype=np.float32)
         self.act_buf = np.zeros(combined_shape(size, act_shape), dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.ret_buf = np.zeros(size, dtype=np.float32)
         self.val_buf = np.zeros(size, dtype=np.float32)
-        self.cadv_buf = np.zeros(size, dtype=np.float32)    # cost advantage
-        self.cost_buf = np.zeros(size, dtype=np.float32)    # costs
-        self.cret_buf = np.zeros(size, dtype=np.float32)    # cost return
-        self.cval_buf = np.zeros(size, dtype=np.float32)    # cost value
+        self.cadv_buf = np.zeros(size, dtype=np.float32)  # cost advantage
+        self.cost_buf = np.zeros(size, dtype=np.float32)  # costs
+        self.cret_buf = np.zeros(size, dtype=np.float32)  # cost return
+        self.cval_buf = np.zeros(size, dtype=np.float32)  # cost value
         self.logp_buf = np.zeros(size, dtype=np.float32)
-        self.pi_info_bufs = {k: np.zeros([size] + list(v), dtype=np.float32)
-                             for k,v in pi_info_shapes.items()}
+        self.pi_info_bufs = {
+            k: np.zeros([size] + list(v), dtype=np.float32)
+            for k, v in pi_info_shapes.items()
+        }
         self.sorted_pi_info_keys = keys_as_sorted_list(self.pi_info_bufs)
         self.gamma, self.lam = gamma, lam
         self.cost_gamma, self.cost_lam = cost_gamma, cost_lam
         self.ptr, self.path_start_idx, self.max_size = 0, 0, size
 
     def store(self, obs, act, rew, val, cost, cval, logp, pi_info):
-        assert self.ptr < self.max_size     # buffer has to have room so you can store
+        assert self.ptr < self.max_size  # buffer has to have room so you can store
         self.obs_buf[self.ptr] = obs
         self.act_buf[self.ptr] = act
         self.rew_buf[self.ptr] = rew
@@ -54,13 +64,15 @@ class CPOBuffer:
         costs = np.append(self.cost_buf[path_slice], last_cval)
         cvals = np.append(self.cval_buf[path_slice], last_cval)
         cdeltas = costs[:-1] + self.gamma * cvals[1:] - cvals[:-1]
-        self.cadv_buf[path_slice] = discount_cumsum(cdeltas, self.cost_gamma * self.cost_lam)
+        self.cadv_buf[path_slice] = discount_cumsum(
+            cdeltas, self.cost_gamma * self.cost_lam
+        )
         self.cret_buf[path_slice] = discount_cumsum(costs, self.cost_gamma)[:-1]
 
         self.path_start_idx = self.ptr
 
     def get(self):
-        assert self.ptr == self.max_size    # buffer has to be full before you can get
+        assert self.ptr == self.max_size  # buffer has to be full before you can get
         self.ptr, self.path_start_idx = 0, 0
 
         # Advantage normalizing trick for policy gradient
@@ -71,9 +83,15 @@ class CPOBuffer:
         cadv_mean, _ = statistics_scalar(self.cadv_buf)
         self.cadv_buf -= cadv_mean
 
-        return [self.obs_buf, self.act_buf, self.adv_buf,
-                self.cadv_buf, self.ret_buf, self.cret_buf,
-                self.logp_buf] + values_as_sorted_list(self.pi_info_bufs)
+        return [
+            self.obs_buf,
+            self.act_buf,
+            self.adv_buf,
+            self.cadv_buf,
+            self.ret_buf,
+            self.cret_buf,
+            self.logp_buf,
+        ] + values_as_sorted_list(self.pi_info_bufs)
 
 
 def statistics_scalar(x, with_min_and_max=False):
@@ -91,7 +109,7 @@ def statistics_scalar(x, with_min_and_max=False):
     global_sum, global_n = np.sum(x), len(x)
     mean = global_sum / global_n
 
-    global_sum_sq = np.sum((x - mean)**2)
+    global_sum_sq = np.sum((x - mean) ** 2)
     std = np.sqrt(global_sum_sq / global_n)  # compute global std
 
     if with_min_and_max:

@@ -9,9 +9,9 @@ from safe_rl.utils.run_utils import setup_logger_kwargs
 def main(robot, task, algo, seed, exp_name, n_envs, visual_obs, safety_checks):
 
     # Verify experiment
-    robot_list = ['point', 'car', 'doggo']
-    task_list = ['goal1', 'goal2', 'button1', 'button2', 'push1', 'push2']
-    algo_list = ['ppo', 'ppo_lagrangian', 'trpo', 'trpo_lagrangian', 'cpo']
+    robot_list = ["point", "car", "doggo"]
+    task_list = ["goal1", "goal2", "button1", "button2", "push1", "push2"]
+    algo_list = ["ppo", "ppo_lagrangian", "trpo", "trpo_lagrangian", "cpo"]
 
     algo = algo.lower()
     task = task.capitalize()
@@ -25,7 +25,7 @@ def main(robot, task, algo, seed, exp_name, n_envs, visual_obs, safety_checks):
     vf_iters = int(80 / k)
 
     # Hyperparameters
-    if robot=='Doggo':
+    if robot == "Doggo":
         num_steps = 1e8
         steps_per_epoch = 60000
     else:
@@ -37,7 +37,7 @@ def main(robot, task, algo, seed, exp_name, n_envs, visual_obs, safety_checks):
     cost_lim = 25
 
     # Prepare Logger
-    exp_name = exp_name or (algo + '_' + robot.lower() + task.lower())
+    exp_name = exp_name or (algo + "_" + robot.lower() + task.lower())
     logger_kwargs = setup_logger_kwargs(exp_name, seed)
 
     kwargs = {}
@@ -46,40 +46,49 @@ def main(robot, task, algo, seed, exp_name, n_envs, visual_obs, safety_checks):
 
     # Algo and Env
     algo = getattr(safe_rl, algo)
-    env_name = 'Safexp-'+robot+task+'-v0'
+    env_name = "Safexp-" + robot + task + "-v0"
 
     log_params = {"pi_iters": pi_iters}
-    algo(env_fn=lambda: gym.make(env_name),
-         ac_kwargs=dict(
-             hidden_sizes=(256, 256),
-            ),
-         epochs=epochs,
-         steps_per_epoch=steps_per_epoch,
-         save_freq=save_freq,
-         target_kl=target_kl,
-         cost_lim=cost_lim,
-         seed=seed,
-         logger_kwargs=logger_kwargs,
-         env_name=env_name,
-         visual_obs=visual_obs,
-         safety_checks=safety_checks,
-         vf_iters=vf_iters,
-         log_params=log_params,
-         n_envs=n_envs,
-         **kwargs,
-         )
+    algo(
+        env_fn=lambda: gym.make(env_name),
+        ac_kwargs=dict(hidden_sizes=(256, 256),),
+        epochs=epochs,
+        steps_per_epoch=steps_per_epoch,
+        save_freq=save_freq,
+        target_kl=target_kl,
+        cost_lim=cost_lim,
+        seed=seed,
+        logger_kwargs=logger_kwargs,
+        env_name=env_name,
+        visual_obs=visual_obs,
+        safety_checks=safety_checks,
+        vf_iters=vf_iters,
+        log_params=log_params,
+        n_envs=n_envs,
+        **kwargs,
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--robot', type=str, default='Point')
-    parser.add_argument('--task', type=str, default='Goal1')
-    parser.add_argument('--algo', type=str, default='ppo')
-    parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--exp_name', type=str, default='')
-    parser.add_argument('--n_envs', type=int, default=6)
+    parser.add_argument("--robot", type=str, default="Point")
+    parser.add_argument("--task", type=str, default="Goal1")
+    parser.add_argument("--algo", type=str, default="ppo")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--exp_name", type=str, default="")
+    parser.add_argument("--n_envs", type=int, default=6)
     parser.add_argument("--vision", action="store_true")
     parser.add_argument("--safe", action="store_true")
     args = parser.parse_args()
-    main(args.robot, args.task, args.algo, args.seed, args.exp_name, args.n_envs, args.vision, args.safe)
+    main(
+        args.robot,
+        args.task,
+        args.algo,
+        args.seed,
+        args.exp_name,
+        args.n_envs,
+        args.vision,
+        args.safe,
+    )
